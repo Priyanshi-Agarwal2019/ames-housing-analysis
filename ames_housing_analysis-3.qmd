@@ -1,0 +1,841 @@
+---
+title: "Ames Housing Price Prediction Analysis"
+subtitle: "MTTS Capstone Project - Room 3"
+author:
+  - name: "Priyanshi Agarwal"
+  - name: "Aduvet Raizada"
+  - name: "Sanya Khurana"
+  - name: "Prince Chaudhari"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: show
+    theme: cosmo
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+---
+
+**Supervised by:** Mr. Manoj Thakur
+
+---
+
+# Executive Summary
+
+This capstone project analyzes the Ames Housing Dataset to predict residential property sale prices. The dataset contains 1,460 observations with 79 explanatory variables describing physical, locational, and qualitative attributes of homes in Ames, Iowa.
+
+**Key Findings:**
+
+- SalePrice is right-skewed, requiring logarithmic transformation
+- OverallQual, GrLivArea, and TotalBsmtSF are the strongest numeric predictors
+- Neighborhood and KitchenQual show significant categorical influence
+- Final model achieves robust fit with minimal multicollinearity
+
+# Introduction
+
+## Objective
+
+The goal of this study is to analyze housing data and understand the factors influencing house prices. The response variable is SalePrice.
+
+## Research Questions
+
+1. What is the distribution of SalePrice?
+2. Which variables show strong relationships with SalePrice?
+3. Are there missing values and outliers that may affect modeling?
+
+## Dataset Overview
+
+This data contains residential home sales in Ames with 79 explanatory variables (excluding ID) describing physical, locational and qualitative attributes of houses.
+
+# Setup and Data Loading
+
+```{r setup}
+library(tidyverse)
+library(e1071)
+library(skimr)
+library(car)
+library(caret)
+
+# Load data
+train_dt <- read.csv("train.csv", header = TRUE)
+test_dt  <- read.csv("test.csv",  header = TRUE)
+
+# Combine for preprocessing
+full_dt = bind_rows(train_dt, test_dt)
+
+# Display dimensions
+dim(train_dt)
+dim(test_dt)
+```
+
+# Variable Classification
+
+```{r variable-types}
+# Define categorical variables
+categorical_vars = c("MSSubClass", 
+                     names(full_dt)[sapply(full_dt, is.character)],
+                     "OverallQual", "OverallCond")
+
+# Ordinal categorical variables (qualitative but ordered)
+ordinal_vars <- c(
+  "ExterQual", "ExterCond",
+  "BsmtQual", "BsmtCond", "BsmtExposure",
+  "BsmtFinType1", "BsmtFinType2",
+  "HeatingQC", "KitchenQual",
+  "FireplaceQu", "GarageQual", "GarageCond",
+  "PoolQC","OverallQual", "OverallCond"
+)
+
+# Nominal categorical variables
+nominal_vars <- categorical_vars[!categorical_vars %in% ordinal_vars]
+
+# Quantitative ordinal variables
+numeric_ordinal_vars <- c("OverallQual", "OverallCond")
+
+# Non-numeric ordinal variables
+non_num_ord_vars <- c("ExterQual", "ExterCond",
+                      "BsmtQual", "BsmtCond", "BsmtExposure",
+                      "BsmtFinType1", "BsmtFinType2",
+                      "HeatingQC", "KitchenQual",
+                      "FireplaceQu", "GarageQual", "GarageCond",
+                      "PoolQC")
+```
+
+**Interpretation**: Ordinal variables represent ordered qualitative information. Although sometimes encoded numerically, they do not represent continuous quantities. Treating ordinal variables as numerical may introduce incorrect assumptions of linearity.
+
+# Data Preprocessing
+
+## Handling Missing Values
+
+### Variables where NA means "feature absent"
+
+```{r absence-vars}
+absence_vars <- c("FireplaceQu","GarageQual","GarageCond",
+                  "BsmtQual","BsmtCond","BsmtExposure",
+                  "BsmtFinType1","BsmtFinType2","PoolQC","MiscFeature",
+                  "Alley","Fence","GarageType","GarageFinish","MasVnrType")
+
+full_dt[absence_vars] <- lapply(full_dt[absence_vars], function(x) {
+  x <- as.character(x)
+  x[is.na(x)] <- "No"
+  x
+})
+```
+
+### Numeric variables with NA indicating non-existence
+
+```{r numeric-absence}
+absence_num_vars <- c("GarageYrBlt", "MasVnrArea", "LotFrontage")
+
+for (v in absence_num_vars) {
+  full_dt[[paste0("Has_", v)]] <- ifelse(is.na(full_dt[[v]]), 0, 1)
+  full_dt[[v]][is.na(full_dt[[v]])] <- 0
+}
+```
+
+**Rationale**: For numeric variables where NA indicates non-existence rather than missing measurement, indicator variables were introduced to distinguish presence from magnitude, thereby avoiding distortion of the numeric scale.
+
+### Electrical System
+
+```{r electrical}
+full_dt$Electrical <- as.character(full_dt$Electrical)
+full_dt$Electrical[is.na(full_dt$Electrical)] <- "Unknown"
+full_dt$Electrical <- factor(full_dt$Electrical)
+```
+
+**Rationale**: Electrical is treated as a nominal categorical variable. Missing values do not indicate absence of electricity but unknown classification; therefore, an explicit 'Unknown' category is introduced.
+
+## Ordinal Variable Encoding
+
+```{r ordinal-encoding}
+# Convert MSSubClass to factor
+full_dt$MSSubClass <- as.factor(full_dt$MSSubClass)
+
+# Explicit level ordering for qualitative ordinal variables
+qual_levels <- list(
+  ExterQual    = c("No","Po","Fa","TA","Gd","Ex"),
+  ExterCond    = c("No","Po","Fa","TA","Gd","Ex"),
+  BsmtQual     = c("No","Po","Fa","TA","Gd","Ex"),
+  BsmtCond     = c("No","Po","Fa","TA","Gd","Ex"),
+  BsmtExposure = c("No","Mn","Av","Gd"),
+  BsmtFinType1 = c("No","Unf","LwQ","Rec","BLQ","ALQ","GLQ"),
+  BsmtFinType2 = c("No","Unf","LwQ","Rec","BLQ","ALQ","GLQ"),
+  HeatingQC    = c("Po","Fa","TA","Gd","Ex"),
+  KitchenQual  = c("Po","Fa","TA","Gd","Ex"),
+  FireplaceQu  = c("No","Po","Fa","TA","Gd","Ex"),
+  GarageQual   = c("No","Po","Fa","TA","Gd","Ex"),
+  GarageCond   = c("No","Po","Fa","TA","Gd","Ex"),
+  PoolQC       = c("No","Fa","TA","Gd","Ex")
+)
+
+for (v in names(qual_levels)) {
+  full_dt[[v]] <- factor(
+    full_dt[[v]],
+    levels = qual_levels[[v]],
+    ordered = TRUE
+  )
+}
+```
+
+## Split back to train and test
+
+```{r split-data}
+train_dt <- full_dt[1:nrow(train_dt), ]
+test_dt  <- full_dt[(nrow(train_dt)+1):nrow(full_dt), ]
+
+# Binary indicators
+binary_vars <- grep("^Has_", names(train_dt), value = TRUE)
+
+# Continuous numeric variables
+numeric_continuous <- names(train_dt)[
+  sapply(train_dt, is.numeric) &
+    !(names(train_dt) %in% c(
+      binary_vars,
+      numeric_ordinal_vars,
+      "SalePrice"
+    ))
+]
+```
+
+## Variable Type Summary
+
+```{r variable-summary}
+variable_type_summary <- data.frame(
+  Variable = names(train_dt),
+  Type = case_when(
+    names(train_dt) %in% binary_vars ~ "Binary (Indicator)",
+    names(train_dt) %in% nominal_vars ~ "Categorical (Nominal)",
+    names(train_dt) %in% ordinal_vars ~ "Categorical (Ordinal)",
+    names(train_dt) %in% numeric_ordinal_vars ~ "Numeric (Ordinal)",
+    names(train_dt) %in% numeric_continuous ~ "Continuous",
+    names(train_dt) == "SalePrice" ~ "Response Variable",
+    TRUE ~ "Other"
+  )
+)
+
+table(variable_type_summary$Type)
+```
+
+# Exploratory Data Analysis
+
+## Response Variable Analysis
+
+### Summary Statistics
+
+```{r saleprice-summary}
+summary(train_dt$SalePrice)
+skim(train_dt)
+```
+
+### Distribution of SalePrice
+
+```{r saleprice-dist, fig.width=10, fig.height=6}
+hist(
+  train_dt$SalePrice,
+  breaks = 40,
+  probability = TRUE,
+  col = "lightblue",
+  main = "Distribution of SalePrice",
+  xlab = "SalePrice"
+)
+
+lines(
+  density(train_dt$SalePrice, na.rm = TRUE),
+  col = "red",
+  lwd = 2
+)
+```
+
+### Q-Q Plot
+
+```{r qq-plot, fig.width=8, fig.height=6}
+qqnorm(train_dt$SalePrice)
+qqline(train_dt$SalePrice, col = "red")
+```
+
+### Skewness and Kurtosis
+
+```{r skew-kurt}
+skewness(train_dt$SalePrice, na.rm = TRUE)
+kurtosis(train_dt$SalePrice, na.rm = TRUE)
+```
+
+**Observation and Interpretation**:
+
+1. The SalePrice distribution is heavily right-skewed, indicating that most houses are concentrated in a moderate price range, while a small number of high-priced houses form a long upper tail.
+
+2. The Q–Q plot shows clear deviation from normality in the upper tail, confirming violation of linear regression assumptions on the original scale.
+
+3. This motivates the use of a log transformation to stabilize variance and improve model validity.
+
+4. The distribution has heavy tails and is more sharply peaked at the center compared to a normal distribution.
+
+## Log Transformation
+
+```{r log-transform, fig.width=12, fig.height=6}
+# Create log-transformed variable
+train_dt$LogSalePrice <- log1p(train_dt$SalePrice)
+
+# Compare distributions
+par(mfrow = c(1,2))
+
+hist(train_dt$SalePrice,
+     breaks = 40,
+     probability = TRUE,
+     main = "SalePrice",
+     col = "lightgray")
+lines(density(train_dt$SalePrice), col = "red", lwd = 2)
+
+hist(train_dt$LogSalePrice,
+     breaks = 40,
+     probability = TRUE,
+     main = "Log(SalePrice)",
+     col = "lightgray")
+lines(density(train_dt$LogSalePrice), col = "blue", lwd = 2)
+
+par(mfrow = c(1,1))
+```
+**Reasoning**:
+
+-To address skewness and stabilize variance, a logarithmic transformation was applied to SalePrice. The transformed variable shows a distribution closer to normal, improving model performance and interpretability.
+
+## Outlier Detection
+
+### Original Scale Outliers
+
+```{r outliers-original, fig.width=8, fig.height=6}
+Sale_box <- boxplot(train_dt$SalePrice, 
+        range = 1.5,
+        horizontal = FALSE, 
+        varwidth = TRUE, 
+        notch = FALSE, 
+        outline = TRUE,
+        boxwex = 0.3, 
+        border = "blue", 
+        col = "red")
+
+Sale_outlier <- Sale_box$out
+outlier_rows <- which(train_dt$SalePrice %in% Sale_outlier)
+```
+
+**NOTE**:
+The remaining outliers after transformation correspond to genuinely extreme market cases, such as luxury houses in premium neighborhoods and very low-priced properties in older areas.
+These observations are retained because they represent real market behavior rather than data errors.
+
+### Log Scale Outliers
+
+```{r outliers-log, fig.width=8, fig.height=6}
+# Log transform first to see "true" statistical anomalies
+log_price <- log(train_dt$SalePrice)
+
+Sale_box <- boxplot(log_price, 
+                   range = 1.5,
+                   horizontal = FALSE, 
+                   varwidth = TRUE, 
+                   notch = FALSE, 
+                   outline = TRUE,
+                   boxwex = 0.3, 
+                   border = "blue", 
+                   col = "red")
+
+Sale_outlier_logs <- Sale_box$out
+outlier_values <- train_dt$SalePrice[log_price %in% Sale_outlier_logs]
+outlier_rows <- which(train_dt$SalePrice %in% outlier_values)
+
+# View the full rows for those outliers
+train_dt[outlier_rows, c("SalePrice", "OverallQual", "GrLivArea", "Neighborhood")]
+```
+
+## Numeric Variables Analysis
+
+### Correlation with LogSalePrice
+
+```{r numeric-corr}
+num_corr <- sapply(train_dt[numeric_continuous],
+  function(x)
+    cor(x, train_dt$LogSalePrice, use = "complete.obs"))
+
+num_corr <- sort(num_corr, decreasing = TRUE)
+
+head(num_corr, 10)
+tail(num_corr, 10)
+```
+
+**Interpretation**: Variables with |Correlation| > 0.5 are considered highly influential.
+**Observation**: None of the top ten numeric variables show extremely high negative correlation with the Sales Price in the dataset.
+
+### Scatterplots for Top Numeric Predictors
+
+```{r scatterplots, fig.width=12, fig.height=16}
+top_num_vars <- names(head(num_corr, 10))
+
+par(mfrow = c(5, 2))
+for (v in top_num_vars) {
+  plot(
+    train_dt[[v]], train_dt$LogSalePrice,
+    main = paste("Log(SalePrice) vs", v),
+    xlab = v,
+    ylab = "Log(SalePrice)",
+    pch = 20,
+    col = "darkgray"
+  )
+  abline(lm(train_dt$LogSalePrice ~ train_dt[[v]]), col = "red")
+}
+par(mfrow = c(1,1))
+```
+**Observation**:
+
+1. The scatterplots show a strong positive relationship between size-related variables and price; however, the relationship is not strictly linear.
+
+2. Price increases slow down for very large houses, indicating diminishing marginal returns to size. This explains why size alone cannot fully account for price variation.
+
+## Ordinal Categorical Variables
+
+### Bar Charts
+
+```{r ordinal-barcharts, fig.width=12, fig.height=20}
+par(mfrow = c(5, 3))
+for (v in ordinal_vars) {
+  # Calculate mean LogSalePrice for each level
+  means <- tapply(train_dt$LogSalePrice, train_dt[[v]], mean, na.rm = TRUE)
+  
+  barplot(
+    means,
+    main = paste("Mean LogSalePrice by", v),
+    xlab = v,
+    ylab = "Mean LogSalePrice",
+    col = "lightyellow",
+    las = 2,
+    border = "black"
+  )
+}
+par(mfrow = c(1,1))
+```
+
+### Spearman Correlation
+
+```{r ordinal-corr}
+ord_corr <- sapply(
+  ordinal_vars,
+  function(v)
+    cor(
+      as.numeric(train_dt[[v]]),
+      train_dt$LogSalePrice,
+      method = "spearman",
+      use = "complete.obs"
+    )
+)
+
+sort(ord_corr, decreasing = TRUE)
+```
+
+## Nominal Categorical Variables
+
+### ANOVA Tests
+
+```{r anova}
+anova_results <- sapply(
+  nominal_vars,
+  function(v) {
+    fit <- aov(LogSalePrice ~ as.factor(train_dt[[v]]), data = train_dt)
+    summary(fit)[[1]]$`Pr(>F)`[1]
+  }
+)
+
+anova_results <- sort(anova_results, decreasing = FALSE)
+head(anova_results, 10)
+```
+
+**Interpretation**: 
+
+1.ANOVA tests whether mean SalePrice differs across categories. In particular, Neighborhood exhibits strong differences in price distribution, confirming that location introduces a structural price premium that cannot be captured by numeric variables alone.
+
+2. Small p-values indicate strong association.
+
+### Kruskal-Wallis Tests
+
+```{r kruskal}
+kw_results <- sapply(
+  nominal_vars,
+  function(v)
+    kruskal.test(train_dt$LogSalePrice ~ train_dt[[v]])$p.value
+)
+
+kw_results <- sort(kw_results)
+head(kw_results, 10)
+```
+
+**Interpretation**: Kruskal-Wallis test is non-parametric and can handle outliers well.
+
+### Boxplots of Top Nominal Variables (ANOVA)
+
+```{r nominal-boxplots-anova, fig.width=12, fig.height=10}
+top_nominal_anova <- names(head(anova_results, 4))
+
+par(mfrow = c(2, 2))
+for (v in top_nominal_anova) {
+  boxplot(
+    train_dt$SalePrice ~ train_dt[[v]],
+    main = paste("SalePrice by", v),
+    xlab = v,
+    ylab = "SalePrice",
+    col = "lightblue",
+    las = 2,
+    outline = TRUE
+  )
+}
+par(mfrow = c(1,1))
+```
+
+### Boxplots of Top Nominal Variables (Kruskal-Wallis)
+
+```{r nominal-boxplots-kw, fig.width=12, fig.height=15}
+top_nominal_kw <- names(head(kw_results, 5))
+
+par(mfrow = c(3, 2))
+for (v in top_nominal_kw) {
+  boxplot(
+    train_dt$SalePrice ~ train_dt[[v]],
+    main = paste("SalePrice by", v),
+    xlab = v,
+    ylab = "SalePrice",
+    col = "lightblue",
+    las = 2,
+    outline = TRUE
+  )
+}
+par(mfrow = c(1,1))
+```
+
+## Multicollinearity Assessment
+
+### Correlation Matrix
+
+```{r corr-matrix}
+corr_matrix <- cor(
+  train_dt[numeric_continuous],
+  use = "complete.obs"
+)
+
+symnum(corr_matrix)
+```
+
+### High Correlation Pairs
+
+```{r high-corr}
+high_corr <- data.frame(Variable1 = character(),
+                        Variable2 = character(),
+                        Correlation = numeric(),
+                        stringsAsFactors = FALSE)
+
+for(i in 1:nrow(corr_matrix)){
+  for(j in 1:ncol(corr_matrix)){
+    if(corr_matrix[i,j] > 0.5 && i > j){ 
+      high_corr <- rbind(high_corr, data.frame(
+        Variable1 = rownames(corr_matrix)[i],
+        Variable2 = colnames(corr_matrix)[j],
+        Correlation = corr_matrix[i, j])
+      )
+    }
+  }
+}
+
+print(high_corr)
+```
+
+### VIF Analysis (Initial Model)
+
+```{r vif-initial}
+top_vars <- names(sort(num_corr, decreasing = TRUE)[1:6])
+
+lm_base <- lm(LogSalePrice ~ ., 
+              data = train_dt[, c("LogSalePrice", top_vars)])
+
+vif(lm_base)
+```
+
+**Interpretation**: VIF > 5 indicates unstable coefficients. Remove or combine variables if VIF is too high.
+
+### Error Analysis
+
+```{r errr-analysis}
+set.seed(123)
+train_indices_caret <- createDataPartition(
+  y = train_dt$LogSalePrice,
+  p = 0.70,
+  list = FALSE
+)
+
+# 3. Create the training dataset
+train_data_caret <- train_dt[train_indices_caret, ]
+
+# 4. Create the testing dataset
+model_data_caret <- train_dt[-train_indices_caret, ]
+
+lm1 <- lm(LogSalePrice ~ OverallQual +
+            GrLivArea +
+            TotalBsmtSF +
+            GarageCars +
+            Has_GarageYrBlt +
+            KitchenQual +
+            Neighborhood, data = train_data_caret)
+
+
+summary(lm1)
+# Predictions on test data
+model_data_caret$pred_LogSalePrice <- predict(
+  lm1,
+  newdata = model_data_caret
+)
+
+# Convert back to original price scale
+model_data_caret$pred_SalePrice <- exp(model_data_caret$pred_LogSalePrice)
+model_data_caret$actual_SalePrice <- exp(model_data_caret$LogSalePrice)
+
+# Error terms
+model_data_caret$error <- model_data_caret$actual_SalePrice -
+  model_data_caret$pred_SalePrice
+
+model_data_caret$abs_error <- abs(model_data_caret$error)
+
+model_data_caret$perc_error <- 
+  100 * model_data_caret$abs_error / model_data_caret$actual_SalePrice
+
+MAE  <- mean(model_data_caret$abs_error)
+RMSE <- sqrt(mean(model_data_caret$error^2))
+MAPE <- mean(model_data_caret$perc_error)
+
+MAE  # MAE reflects typical absolute error 
+RMSE #RMSE penalizes large errors more strongly 
+MAPE #MAPE expresses error in percentage terms, making it scale-independent.
+```
+**Observation**: 
+The model achieves an average absolute error of approximately $20,574.46 and a mean absolute percentage error of about 11.5%. While some large errors remain for extreme-priced houses,overall performance is reasonable and consistent with the inherent variability of the housing market.
+
+**Remark**:
+MAE represents the typical prediction error, while RMSE penalizes large deviations more heavily.The higher RMSE relative to MAE indicates that a small number of extreme-priced houses contribute disproportionately to prediction error.MAPE shows that, on average, predictions are within approximately 10–12% of actual prices
+
+
+``` {r-ErrorAna}
+# Predictions on test data (log scale)
+pred_log <- predict(lm1, newdata = model_data_caret)
+
+# Residuals (log scale)
+resid_log <- model_data_caret$LogSalePrice - pred_log
+
+#Residual v/s fitted
+plot(pred_log, resid_log,
+     xlab = "Fitted Values (Log SalePrice)",
+     ylab = "Residuals",
+     main = "Residuals vs Fitted Values (Test Data)",
+     pch = 16, col = rgb(0, 0, 0, 0.4))
+
+abline(h = 0, col = "red", lty = 2)
+#Interpretation:Residuals are roughly centered around zero with no strong systematic pattern,
+#suggesting that the linear model captures the main structure of the data.
+
+#histogram of residuals
+hist(resid_log,
+     breaks = 30,
+     main = "Histogram of Residuals (Log Scale)",
+     xlab = "Residuals",
+     col = "lightblue")
+#symmetric shows it is not biased
+qqnorm(resid_log,
+       main = "Normal Q-Q Plot of Residuals")
+qqline(resid_log, col = "red", lwd = 2)
+
+plot(pred_log, sqrt(abs(resid_log)),
+     xlab = "Fitted Values (Log SalePrice)",
+     ylab = "Sqrt(|Residuals|)",
+     main = "Scale-Location Plot",
+     pch = 16, col = rgb(0, 0, 0, 0.4))#horizontal band shows constant variance
+
+#Actual v/s predicted
+actual_log <- model_data_caret$LogSalePrice
+
+plot(actual_log, pred_log,
+     xlab = "Actual Log(SalePrice)",
+     ylab = "Predicted Log(SalePrice)",
+     main = "Actual vs Predicted Prices",
+     pch = 16, col = rgb(0, 0, 0, 0.4))
+
+abline(0, 1, col = "red", lwd = 2)
+#Interpretation: points close to the diagonal indicate accurate predictions, while deviations highlight 
+#over- and under-estimation, particularly at the upper price range.
+```
+
+# Final Model
+
+## Model Specification
+
+```{r final-model}
+final_model <- lm(
+  LogSalePrice ~
+    OverallQual +
+    GrLivArea +
+    TotalBsmtSF +
+    GarageCars +
+    Has_GarageYrBlt +
+    KitchenQual +
+    Neighborhood,
+  data = train_dt
+)
+
+summary(final_model)
+```
+
+## Model Diagnostics
+
+### VIF for Final Model
+
+```{r final-vif}
+vif(final_model)
+```
+
+**Interpretation**: All VIF values are below 5, indicating acceptable levels of multicollinearity.
+
+### Diagnostic Plots
+
+```{r diagnostic-plots, fig.width=12, fig.height=12}
+par(mfrow = c(2, 2))
+plot(final_model)
+par(mfrow = c(1, 1))
+```
+
+**Interpretation:**
+
+- **Residuals vs Fitted**: Random scatter indicates good linear fit
+- **Normal Q-Q**: Points should follow diagonal line for normality
+- **Scale-Location**: Horizontal line suggests constant variance (homoscedasticity)
+- **Residuals vs Leverage**: Identifies influential observations
+
+**Observation**:
+
+- Residual diagnostics performed on the test dataset show residuals centered around zero with no strong systematic patterns.
+
+- This suggests that the linear model captures the primary structure of the data and generalizes reasonably well to unseen observations.
+
+- Mild deviations at extreme fitted values are expected in housing data due to high-priced outliers.
+
+# Predictions
+
+## Handling Missing Values in Test Set
+
+**Rationale**: Prediction errors caused by missing values were resolved by restricting imputation to common variables between training and test datasets and aligning factor levels prior to prediction.
+
+```{r align-factors}
+# Align factor levels between train and test
+for (col in names(train_dt)) {
+  if (is.factor(train_dt[[col]])) {
+    levels(test_dt[[col]]) <- levels(train_dt[[col]])
+  }
+}
+```
+
+```{r impute-numeric}
+# Median imputation for numeric variables
+numeric_common <- intersect(numeric_continuous, names(test_dt))
+
+for (col in numeric_common) {
+  med_val <- median(train_dt[[col]], na.rm = TRUE)
+  test_dt[[col]][is.na(test_dt[[col]])] <- med_val
+}
+```
+
+```{r impute-categorical}
+# Mode imputation for categorical variables
+cat_vars <- names(train_dt)[sapply(train_dt, is.factor)]
+cat_common <- intersect(cat_vars, names(test_dt))
+
+get_mode <- function(x) {
+  ux <- na.omit(unique(x))
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+for (col in cat_common) {
+  mode_val <- get_mode(train_dt[[col]])
+  test_dt[[col]][is.na(test_dt[[col]])] <- mode_val
+}
+
+# Ensure factor levels align
+for (col in cat_common) {
+  levels(test_dt[[col]]) <- levels(train_dt[[col]])
+}
+```
+
+## Generate Predictions on Test Set
+
+```{r predictions}
+test_dt$LogSalePrice_pred <- predict(final_model, newdata = test_dt)
+test_dt$SalePrice_pred <- expm1(test_dt$LogSalePrice_pred)
+
+summary(test_dt$SalePrice_pred)
+```
+
+## Prediction Distribution
+
+```{r pred-dist, fig.width=10, fig.height=6}
+hist(
+  test_dt$SalePrice_pred,
+  breaks = 40,
+  col = "lightgreen",
+  main = "Distribution of Predicted Sale Prices",
+  xlab = "Predicted SalePrice",
+  border = "white"
+)
+```
+**Interpretation**
+As expected distribution of predicted sale prices in also right skewed showing that there will be fewer houses with higher prices.
+
+
+# Conclusions
+
+## Key Findings
+
+1. **Distribution**: SalePrice is right-skewed. Logarithmic transformation successfully normalizes the distribution.
+
+2. **Important Predictors**:
+   - **OverallQual**: Overall quality is the strongest predictor
+   - **GrLivArea**: Living area has strong positive correlation
+   - **TotalBsmtSF**: Basement area significantly influences price
+   - **Neighborhood**: Location shows substantial categorical influence
+   - **KitchenQual**: Kitchen quality provides additional predictive power
+
+3. **Model Quality**: The final model achieves strong fit with minimal multicollinearity (all VIF < 5).
+
+4. **Data Quality**: Strategic handling of missing values through indicator variables preserves information while maintaining model integrity.
+
+## Limitations
+
+- Model assumes linear relationships in log-transformed space
+- Categorical variables with many levels may benefit from regularization
+- Temporal dynamics not fully exploited
+- Interaction effects between predictors not explored
+
+## Future Work
+
+1. Explore advanced models: Ridge, Lasso, Random Forest, Gradient Boosting
+2. Create interaction terms and polynomial features
+3. Implement cross-validation for robust performance assessment
+4. Incorporate time-series elements for market trends
+5. Use geospatial techniques for neighborhood effects
+
+## Practical Implications
+
+Housing prices in Ames, Iowa are primarily driven by quality, size, and location. This provides insights for:
+
+- **Homebuyers**: Prioritize overall quality and living space
+- **Sellers**: Kitchen quality and basement improvements yield returns
+- **Appraisers**: Data-driven valuation framework
+- **Policy Makers**: Understanding housing market dynamics
+
+# Session Information
+
+```{r session-info}
+sessionInfo()
+```
